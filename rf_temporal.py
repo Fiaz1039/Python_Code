@@ -101,7 +101,10 @@ def bootstrap_ci(values: np.ndarray, n: int = 2000) -> tuple[float, float]:
     return float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
 
 
-def leave_one_participant_out(df: pd.DataFrame, columns: list[str], negative: str, positive: str) -> dict:
+def leave_one_participant_out(
+    df: pd.DataFrame, columns: list[str], negative: str, positive: str, model_factory=None
+) -> dict:
+    model_factory = model_factory or make_model
     data = df[df["label"].isin([negative, positive])]
     X = data[columns].to_numpy()
     y = (data["label"] == positive).to_numpy().astype(int)
@@ -113,9 +116,10 @@ def leave_one_participant_out(df: pd.DataFrame, columns: list[str], negative: st
         test = pids == pid
         if not test.any() or test.all():
             continue
-        model = make_model().fit(X[~test], y[~test])
+        model = model_factory().fit(X[~test], y[~test])
         scores[test] = model.predict_proba(X[test])[:, 1]
-        importances.append(model.feature_importances_)
+        imp = np.asarray(model.feature_importances_, dtype=float)
+        importances.append(imp / imp.sum())
         if 0 < y[test].sum() < test.sum():
             per_person[pid] = roc_auc_score(y[test], scores[test])
 
