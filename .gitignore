@@ -1,0 +1,7 @@
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Patient data and outputs - keep out of version control
+*.csv
+*.zip
