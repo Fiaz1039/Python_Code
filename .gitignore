@@ -5,3 +5,6 @@ __pycache__/
 # Patient data and outputs - keep out of version control
 *.csv
 *.zip
+
+# CatBoost training logs
+catboost_info/

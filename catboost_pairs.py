@@ -27,6 +27,7 @@ def make_catboost() -> CatBoostClassifier:
         thread_count=-1,
         random_seed=SEED,
         verbose=0,
+        allow_writing_files=False,
     )
 
 
