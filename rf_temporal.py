@@ -11,7 +11,8 @@ Feature sets compared (each adds to the previous one):
               1h-vs-24h change
     time      temporal + time of day (sin/cos of hour), as a confound check
 
-Tasks: pre_ictal vs baseline, attack vs baseline.
+Tasks (negative class vs positive class):
+    baseline vs pre_ictal, pre_ictal vs attack, attack vs post_ictal
 
 Reliability: every fold holds out one whole participant. AUC is computed per
 held-out participant and summarised as mean with a 95% bootstrap interval over
@@ -33,8 +34,9 @@ from random_forest import FFILL_LIMIT
 SEED = 42
 WINDOWS = ["1h", "6h", "24h"]
 TASKS = {
-    "preictal_vs_baseline": "pre_ictal",
-    "attack_vs_baseline": "attack",
+    "baseline_vs_preictal": ("baseline", "pre_ictal"),
+    "preictal_vs_attack": ("pre_ictal", "attack"),
+    "attack_vs_postictal": ("attack", "post_ictal"),
 }
 
 
@@ -99,24 +101,29 @@ def bootstrap_ci(values: np.ndarray, n: int = 2000) -> tuple[float, float]:
     return float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
 
 
-def leave_one_participant_out(df: pd.DataFrame, columns: list[str], positive: str) -> dict:
-    data = df[df["label"].isin(["baseline", positive])]
+def leave_one_participant_out(df: pd.DataFrame, columns: list[str], negative: str, positive: str) -> dict:
+    data = df[df["label"].isin([negative, positive])]
     X = data[columns].to_numpy()
     y = (data["label"] == positive).to_numpy().astype(int)
     pids = data["participant_full_id"].to_numpy()
 
     scores = np.zeros(len(y))
-    per_person = {}
+    per_person, importances = {}, []
     for pid in np.unique(pids):
         test = pids == pid
+        if not test.any() or test.all():
+            continue
         model = make_model().fit(X[~test], y[~test])
         scores[test] = model.predict_proba(X[test])[:, 1]
+        importances.append(model.feature_importances_)
         if 0 < y[test].sum() < test.sum():
             per_person[pid] = roc_auc_score(y[test], scores[test])
 
     aucs = np.array(list(per_person.values()))
     low, high = bootstrap_ci(aucs)
+    importance = pd.Series(np.mean(importances, axis=0), index=columns).sort_values(ascending=False)
     return {
+        "n_rows": {negative: int((y == 0).sum()), positive: int((y == 1).sum())},
         "pooled_roc_auc": roc_auc_score(y, scores),
         "pooled_pr_auc": average_precision_score(y, scores),
         "positive_rate": float(y.mean()),
@@ -125,6 +132,7 @@ def leave_one_participant_out(df: pd.DataFrame, columns: list[str], positive: st
         "people_above_0.5": int((aucs > 0.5).sum()),
         "people_evaluated": int(len(aucs)),
         "per_person_auc": per_person,
+        "top_features": importance.head(10).round(4).to_dict(),
     }
 
 
@@ -135,13 +143,13 @@ def main(features_dir: str, output_dir: str, horizons: list[str]) -> None:
     for horizon in horizons:
         df = load(Path(features_dir), horizon)
         feature_sets = build_feature_sets(df)
-        for task, positive in TASKS.items():
+        for task, (negative, positive) in TASKS.items():
             for name, columns in feature_sets.items():
-                r = leave_one_participant_out(df, columns, positive)
+                r = leave_one_participant_out(df, columns, negative, positive)
                 results[f"{horizon}/{task}/{name}"] = r
                 lo, hi = r["per_person_auc_ci95"]
                 print(
-                    f"{horizon} {task:21s} {name:8s} "
+                    f"{horizon} {task:21s} {name:8s} n={r['n_rows']} "
                     f"per-person AUC {r['per_person_auc_mean']:.3f} [{lo:.3f}-{hi:.3f}] "
                     f"({r['people_above_0.5']}/{r['people_evaluated']} >0.5)  "
                     f"pooled AUC {r['pooled_roc_auc']:.3f}  "
