@@ -39,6 +39,7 @@ from random_forest import FFILL_LIMIT
 
 SEED = 42
 WINDOWS = ["1h", "6h", "24h"]
+MIN_ATTACK_EPISODES = 2  # participants with 0 or 1 attack episodes are excluded
 TASKS = {
     "baseline_vs_preictal": ("baseline", "pre_ictal"),
     "preictal_vs_attack": ("pre_ictal", "attack"),
@@ -46,11 +47,27 @@ TASKS = {
 }
 
 
-def load(features_dir: Path, horizon: str) -> pd.DataFrame:
+def attack_episodes(df: pd.DataFrame) -> pd.Series:
+    """Number of separate attack episodes (runs of consecutive attack rows) per participant."""
+    is_attack = df["label"].eq("attack")
+    starts = is_attack & ~is_attack.groupby(df["participant_full_id"]).shift(fill_value=False)
+    return starts.groupby(df["participant_full_id"]).sum()
+
+
+def load(features_dir: Path, horizon: str, min_attack_episodes: int = MIN_ATTACK_EPISODES) -> pd.DataFrame:
     df = pd.read_csv(features_dir / f"FEATURES_{horizon}.csv")
     df["label"] = df["state_name"].str.replace(r"_\d+h$", "", regex=True)
     df["time"] = pd.to_datetime(df["timestamp_unix"], unit="ms", utc=True)
     df = df.sort_values(["participant_full_id", "time"]).reset_index(drop=True)
+
+    # Drop participants with too few attacks to evaluate on (none, or only one).
+    episodes = attack_episodes(df)
+    keep = episodes.index[episodes >= min_attack_episodes]
+    dropped = sorted(set(episodes.index) - set(keep))
+    if dropped:
+        print(f"Excluding {len(dropped)} participants with < {min_attack_episodes} attack episodes: {dropped}")
+    df = df[df["participant_full_id"].isin(keep)].reset_index(drop=True)
+
     df[FEATURES] = df.groupby("participant_full_id")[FEATURES].ffill(limit=FFILL_LIMIT)
     return df
 
