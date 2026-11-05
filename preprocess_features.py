@@ -41,8 +41,16 @@ LABEL_COLUMNS = ["state", "state_name", "migraine_type", "migraine_type_name"]
 def add_magnitudes(df: pd.DataFrame) -> pd.DataFrame:
     """Add Euclidean-norm columns sqrt(x^2 + y^2 + z^2) for each axis group."""
     df = df.copy()
-    for name, axes in MAGNITUDE_SOURCES.items():
-        df[name] = np.sqrt((df[axes] ** 2).sum(axis=1, min_count=len(axes)))
+    df["acticounts_magnitude"] = np.sqrt(
+        df["acticounts_x_axis"] ** 2
+        + df["acticounts_y_axis"] ** 2
+        + df["acticounts_z_axis"] ** 2
+    )
+    df["counts_magnitude"] = np.sqrt(
+        df["counts_x_axis"] ** 2
+        + df["counts_y_axis"] ** 2
+        + df["counts_z_axis"] ** 2
+    )
     return df
 
 

@@ -26,7 +26,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import average_precision_score, roc_auc_score
+from sklearn.metrics import (
+    average_precision_score,
+    balanced_accuracy_score,
+    f1_score,
+    recall_score,
+    roc_auc_score,
+)
 
 from preprocess_features import FEATURES, HORIZONS
 from random_forest import FFILL_LIMIT
@@ -130,6 +136,10 @@ def leave_one_participant_out(
         "n_rows": {negative: int((y == 0).sum()), positive: int((y == 1).sum())},
         "pooled_roc_auc": roc_auc_score(y, scores),
         "pooled_pr_auc": average_precision_score(y, scores),
+        "balanced_accuracy": balanced_accuracy_score(y, scores >= 0.5),
+        "sensitivity": recall_score(y, scores >= 0.5),
+        "specificity": recall_score(1 - y, scores < 0.5),
+        "f1_positive": f1_score(y, scores >= 0.5),
         "positive_rate": float(y.mean()),
         "per_person_auc_mean": float(aucs.mean()),
         "per_person_auc_ci95": [low, high],

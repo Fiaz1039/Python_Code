@@ -1,0 +1,51 @@
+"""Pairwise comparisons using only the 9 selected features, with no derived
+columns (no per-person scaling, look-back windows or time of day).
+
+Usage:
+    python pairs_raw_features.py <features_dir> <output_dir> [horizon ...]
+
+Runs a random forest and CatBoost on each class pair, evaluated
+leave-one-participant-out. Defaults to the 24H labels.
+Metrics at the 0.5 threshold use class-balanced models.
+"""
+
+import json
+import sys
+from pathlib import Path
+
+from catboost_pairs import make_catboost
+from preprocess_features import FEATURES
+from rf_temporal import TASKS, leave_one_participant_out, load, make_model
+
+MODELS = {"random_forest": make_model, "catboost": make_catboost}
+
+
+def main(features_dir: str, output_dir: str, horizons: list[str]) -> None:
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    results = {}
+    for horizon in horizons:
+        df = load(Path(features_dir), horizon)
+        for task, (negative, positive) in TASKS.items():
+            for model_name, factory in MODELS.items():
+                r = leave_one_participant_out(df, FEATURES, negative, positive, factory)
+                results[f"{horizon}/{task}/{model_name}"] = r
+                lo, hi = r["per_person_auc_ci95"]
+                print(
+                    f"{horizon} {task:21s} {model_name:13s} "
+                    f"per-person AUC {r['per_person_auc_mean']:.3f} [{lo:.3f}-{hi:.3f}] "
+                    f"({r['people_above_0.5']}/{r['people_evaluated']} >0.5)  "
+                    f"pooled AUC {r['pooled_roc_auc']:.3f}  "
+                    f"bal-acc {r['balanced_accuracy']:.3f}  "
+                    f"sens {r['sensitivity']:.3f}  spec {r['specificity']:.3f}  "
+                    f"F1 {r['f1_positive']:.3f}",
+                    flush=True,
+                )
+                (out_dir / "raw_features_results.json").write_text(json.dumps(results, indent=2))
+    print(f"Saved {out_dir / 'raw_features_results.json'}")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 3:
+        sys.exit(__doc__)
+    main(sys.argv[1], sys.argv[2], sys.argv[3:] or ["24H"])
