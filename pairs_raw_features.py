@@ -2,7 +2,9 @@
 columns (no per-person scaling, look-back windows or time of day).
 
 Usage:
-    python pairs_raw_features.py <features_dir> <output_dir> [horizon ...]
+    python pairs_raw_features.py <features_dir> <output_dir> [horizon ...] [--features a,b,...]
+
+--features limits the run to a comma-separated subset of the 9 features.
 
 Runs a random forest and CatBoost on each class pair, evaluated
 leave-one-participant-out. Defaults to the 24H labels.
@@ -20,7 +22,11 @@ from rf_temporal import TASKS, leave_one_participant_out, load, make_model
 MODELS = {"random_forest": make_model, "catboost": make_catboost}
 
 
-def main(features_dir: str, output_dir: str, horizons: list[str]) -> None:
+def main(features_dir: str, output_dir: str, horizons: list[str], features: list[str] = FEATURES) -> None:
+    unknown = set(features) - set(FEATURES)
+    if unknown:
+        sys.exit(f"Unknown features: {sorted(unknown)}")
+    tag = "all" if list(features) == FEATURES else "_".join(features)
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     results = {}
@@ -28,7 +34,7 @@ def main(features_dir: str, output_dir: str, horizons: list[str]) -> None:
         df = load(Path(features_dir), horizon)
         for task, (negative, positive) in TASKS.items():
             for model_name, factory in MODELS.items():
-                r = leave_one_participant_out(df, FEATURES, negative, positive, factory)
+                r = leave_one_participant_out(df, list(features), negative, positive, factory)
                 results[f"{horizon}/{task}/{model_name}"] = r
                 lo, hi = r["per_person_auc_ci95"]
                 print(
@@ -41,11 +47,17 @@ def main(features_dir: str, output_dir: str, horizons: list[str]) -> None:
                     f"F1 {r['f1_positive']:.3f}",
                     flush=True,
                 )
-                (out_dir / "raw_features_results.json").write_text(json.dumps(results, indent=2))
-    print(f"Saved {out_dir / 'raw_features_results.json'}")
+                (out_dir / f"raw_features_results_{tag}.json").write_text(json.dumps(results, indent=2))
+    print(f"Saved {out_dir / f'raw_features_results_{tag}.json'}")
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
         sys.exit(__doc__)
-    main(sys.argv[1], sys.argv[2], sys.argv[3:] or ["24H"])
+    args = sys.argv[3:]
+    chosen = FEATURES
+    if "--features" in args:
+        i = args.index("--features")
+        chosen = args[i + 1].split(",")
+        args = args[:i] + args[i + 2:]
+    main(sys.argv[1], sys.argv[2], args or ["24H"], chosen)
