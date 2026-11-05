@@ -11,6 +11,13 @@ Two splits are compared:
                training, but test rows are not interleaved with training rows.
 
 Models: random forest and CatBoost. Feature sets: EDA + temperature, all 9.
+
+With --cv, both splits become 5-fold cross-validation instead of one split:
+  random       stratified 5-fold over all rows
+  time_ordered each patient's recording is cut into 5 consecutive blocks and
+               fold k tests block k of every patient; training rows within
+               PURGE_HOURS of that patient's test block are dropped
+Results are reported as mean and SD over the 5 folds.
 """
 
 import json
@@ -26,13 +33,15 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold, train_test_split
 
 from catboost_pairs import make_catboost
 from preprocess_features import FEATURES
 from rf_temporal import SEED, TASKS, load, make_model
 
 TEST_SIZE = 0.2
+N_FOLDS = 5
+PURGE_HOURS = 24
 FEATURE_SETS = {
     "eda_temp": ["eda_scl_usiemens", "temperature_celsius"],
     "all_9": FEATURES,
@@ -56,6 +65,35 @@ def time_ordered_split(d: pd.DataFrame, y: np.ndarray):
 SPLITS = {"random": random_split, "time_ordered": time_ordered_split}
 
 
+def random_folds(d: pd.DataFrame, y: np.ndarray):
+    cv = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=SEED)
+    return list(cv.split(np.zeros(len(y)), y))
+
+
+def time_blocked_folds(d: pd.DataFrame, y: np.ndarray):
+    position = d.groupby("participant_full_id").cumcount().to_numpy()
+    size = d.groupby("participant_full_id")["participant_full_id"].transform("size").to_numpy()
+    block = np.minimum((position * N_FOLDS) // size, N_FOLDS - 1)
+    hours = d["timestamp_unix"].to_numpy() / 3.6e6
+    pids = d["participant_full_id"].to_numpy()
+    folds = []
+    for k in range(N_FOLDS):
+        is_test = block == k
+        keep_train = ~is_test
+        for pid in np.unique(pids):
+            mine = pids == pid
+            t = hours[mine & is_test]
+            if len(t):
+                near = mine & (hours >= t.min() - PURGE_HOURS) & (hours <= t.max() + PURGE_HOURS)
+                keep_train &= ~near
+        idx = np.arange(len(d))
+        folds.append((idx[keep_train], idx[is_test]))
+    return folds
+
+
+CV_SPLITS = {"random": random_folds, "time_ordered": time_blocked_folds}
+
+
 def evaluate(y_true: np.ndarray, score: np.ndarray) -> dict:
     pred = score >= 0.5
     return {
@@ -68,7 +106,7 @@ def evaluate(y_true: np.ndarray, score: np.ndarray) -> dict:
     }
 
 
-def main(features_dir: str, output_dir: str, horizon: str = "24H") -> None:
+def main(features_dir: str, output_dir: str, horizon: str = "24H", cv: bool = False) -> None:
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     df = load(Path(features_dir), horizon)
@@ -78,33 +116,41 @@ def main(features_dir: str, output_dir: str, horizon: str = "24H") -> None:
         # time-ordered split relies on.
         d = df[df["label"].isin([negative, positive])].reset_index(drop=True)
         y = (d["label"] == positive).to_numpy().astype(int)
-        for split_name, split in SPLITS.items():
-            train_idx, test_idx = split(d, y)
+        splits = CV_SPLITS if cv else {n: (lambda f: lambda d, y: [f(d, y)])(f) for n, f in SPLITS.items()}
+        for split_name, make_folds in splits.items():
+            folds = make_folds(d, y)
             for fs_name, columns in FEATURE_SETS.items():
                 X = d[columns].to_numpy()
                 for model_name, factory in MODELS.items():
-                    model = factory().fit(X[train_idx], y[train_idx])
-                    score = model.predict_proba(X[test_idx])[:, 1]
+                    fold_metrics = []
+                    for train_idx, test_idx in folds:
+                        model = factory().fit(X[train_idx], y[train_idx])
+                        score = model.predict_proba(X[test_idx])[:, 1]
+                        fold_metrics.append(evaluate(y[test_idx], score))
+                    m = pd.DataFrame(fold_metrics)
                     r = {
                         "task": task, "split": split_name, "features": fs_name, "model": model_name,
-                        "n_train": int(len(train_idx)), "n_test": int(len(test_idx)),
-                        "test_positive_rate": float(y[test_idx].mean()),
-                        **evaluate(y[test_idx], score),
+                        "n_folds": len(folds),
+                        **{k: float(v) for k, v in m.mean().items()},
+                        **{f"{k}_sd": float(v) for k, v in m.std(ddof=1).fillna(0).items()},
+                        "fold_auc": m["roc_auc"].round(4).tolist(),
                     }
                     results.append(r)
                     print(
                         f"{task:21s} {split_name:12s} {fs_name:8s} {model_name:13s} "
-                        f"AUC {r['roc_auc']:.3f}  acc {r['accuracy']:.3f}  "
-                        f"bal-acc {r['balanced_accuracy']:.3f}  sens {r['sensitivity']:.3f}  "
-                        f"spec {r['specificity']:.3f}  F1 {r['f1_positive']:.3f}",
+                        f"AUC {r['roc_auc']:.3f}±{r['roc_auc_sd']:.3f}  acc {r['accuracy']:.3f}  "
+                        f"bal-acc {r['balanced_accuracy']:.3f}±{r['balanced_accuracy_sd']:.3f}  "
+                        f"sens {r['sensitivity']:.3f}  spec {r['specificity']:.3f}  F1 {r['f1_positive']:.3f}",
                         flush=True,
                     )
-    pd.DataFrame(results).to_csv(out_dir / f"split_80_20_{horizon}.csv", index=False)
-    (out_dir / f"split_80_20_{horizon}.json").write_text(json.dumps(results, indent=2))
+    name = f"split_80_20_{horizon}{'_cv' if cv else ''}"
+    pd.DataFrame(results).to_csv(out_dir / f"{name}.csv", index=False)
+    (out_dir / f"{name}.json").write_text(json.dumps(results, indent=2))
     print(f"Saved results in {out_dir}")
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
         sys.exit(__doc__)
-    main(*sys.argv[1:4])
+    args = [a for a in sys.argv[1:] if a != "--cv"]
+    main(*args[:3], cv="--cv" in sys.argv)
