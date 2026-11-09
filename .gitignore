@@ -8,3 +8,6 @@ __pycache__/
 
 # CatBoost training logs
 catboost_info/
+
+# Excel diaries (patient data)
+*.xlsx
